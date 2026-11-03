@@ -78,10 +78,12 @@ body.touchui #posBox{bottom:calc(164px + env(safe-area-inset-bottom))}
 
 #standings{
   position:absolute;top:156px;right:0;width:132px;padding:7px 8px;
-  font-size:10px;line-height:1.7;
+  font-size:10px;line-height:1.5;
 }
 #standings .row{display:flex;justify-content:space-between;gap:6px;opacity:.85}
 #standings .row.me{opacity:1;color:#fff;font-weight:800}
+#standings .row.fin{opacity:.55}
+#standings .row.fin span:last-child{color:#8ce9a8}
 #standings .row span:last-child{color:var(--dim)}
 
 #exitBtn{
@@ -489,7 +491,7 @@ body.speedo-large #speedo{width:214px;height:214px}
   box-shadow:0 8px 20px rgba(0,0,0,.4)!important;
 }
 #exitBtn:active{background:var(--accent)!important;color:#fff!important;border-color:var(--accent)!important}
-#standings{font-size:10px!important;line-height:1.8!important;max-height:40vh;overflow:auto}
+#standings{font-size:10px!important;line-height:1.5!important;max-height:none;overflow:visible}
 .bval{margin-left:8px;font-weight:800;font-size:11px;color:#fff;font-variant-numeric:tabular-nums}
 #botGroup,#mpBots,#lapGroup{display:flex;align-items:center;gap:6px}
 #botGroup input[type=range],#mpBots input[type=range],#lapGroup input[type=range]{flex:1;min-width:70px}
@@ -854,6 +856,38 @@ button:active,.pill:active,.part:active,.carcard:active,.coursecard:active,.togg
 #touch .tbtn{transition:transform .09s,background .09s,color .09s}
 #touch .tbtn:active{transform:scale(.93)!important}
 
+/* ---- waiting for the rest of the field ---- */
+#waitBanner{
+  position:fixed;left:0;right:0;top:calc(12px + env(safe-area-inset-top));z-index:33;
+  display:none;text-align:center;pointer-events:none;
+  font-style:italic;font-weight:900;
+  font-size:clamp(17px,4.4vw,28px);letter-spacing:.03em;color:#fff;
+  text-shadow:0 0 22px rgba(255,255,255,.35),0 6px 20px rgba(0,0,0,.65);
+  animation:waitPulse 1.6s ease-in-out infinite;
+}
+#waitBanner.on{display:block}
+#waitBanner span{
+  display:block;margin-top:6px;
+  font-style:normal;font-weight:800;
+  font-size:clamp(10px,2.5vw,13px);letter-spacing:.17em;
+  color:rgba(255,255,255,.6);text-shadow:0 2px 10px rgba(0,0,0,.72);
+}
+@keyframes waitPulse{0%,100%{opacity:.72}50%{opacity:1}}
+
+/* ---- host ended the party ---- */
+#leaveAsk{
+  position:fixed;inset:0;z-index:46;display:none;align-items:center;justify-content:center;
+  padding:18px;background:rgba(4,7,10,.94);
+}
+#leaveAsk.on{display:flex;animation:resFade .25s ease-out both}
+.labox{
+  width:min(92vw,380px);background:var(--panel);border:1px solid var(--line);
+  border-left:3px solid var(--accent);padding:18px;
+  box-shadow:0 26px 70px rgba(0,0,0,.78);
+}
+.labox h2{font-size:20px;font-weight:900;letter-spacing:-.01em;margin:4px 0 6px}
+.labox p{font-size:10px;color:#9fb0c1;margin-bottom:12px}
+
 /* ---- party (peer to peer) ---- */
 .netcode{
   width:100%;margin-top:8px;padding:10px 12px;
@@ -1139,6 +1173,18 @@ button:active,.pill:active,.part:active,.carcard:active,.coursecard:active,.togg
 
 <div id="finishBanner"></div>
 
+<div id="waitBanner">WAITING FOR PLAYERS TO FINISH<span>KEEP DRIVING · THE RACE IS STILL ON</span></div>
+
+<div id="leaveAsk">
+  <div class="labox">
+    <div class="loadtag" id="leaveBy">PARTY</div>
+    <h2>HOST ENDED THE PARTY</h2>
+    <p>Leave to the main menu?</p>
+    <button id="leaveYes" class="big-btn">LEAVE</button>
+    <button id="leaveNo" class="pill" style="width:100%;margin-top:8px">STAY IN THE GAME</button>
+  </div>
+</div>
+
 <div id="pause">
   <div class="pausebox">
     <div class="loadtag">PAUSED</div>
@@ -1146,6 +1192,7 @@ button:active,.pill:active,.part:active,.carcard:active,.coursecard:active,.togg
     <div id="pauseInfo" class="deltabox"></div>
     <button id="pauseResume" class="big-btn">RESUME</button>
     <button id="pauseRestart" class="pill">RESTART RACE</button>
+    <button id="pauseEndParty" class="pill" style="display:none">END PARTY FOR EVERYONE</button>
     <button id="pauseGarage" class="pill">GARAGE</button>
   </div>
 </div>
@@ -3855,6 +3902,7 @@ function updateBots(dt){
    ============================================================ */
 let lap=1,sector=0,visited=new Set([0]);
 let raceTime=0,lapStartTime=0,bestLap=Infinity,lastLapShown=0;
+let myFinishTime=0;
 let driftEnd=0;
 /* in a party everyone loads for the same fixed time, so the grid goes green together */
 let mpLoadMs=0;
@@ -3904,20 +3952,44 @@ function updateLap(idx){
   }
 }
 
+/* One ranking rule for the whole field, solo or party: a driver who has
+   crossed the line ranks ahead of everyone still out there, the finishers go
+   in the order they crossed it, and the rest go by the distance they cover.
+   A finished car is pinned to the line, so nobody pads a lead by lapping on
+   long after their own flag. */
+function rankCmp(a,b){
+  const fa=a.fin?0:1,fb=b.fin?0:1;
+  if(fa!==fb)return fa-fb;
+  if(a.fin)return (a.t||0)-(b.t||0);
+  return b.p-a.p;
+}
+
 function standings(){
-  const pl=(lap-1)*T.seg+car.idx;
-  const arr=[{name:'YOU',me:true,p:pl}];
-  for(const b of bots)arr.push({name:b.name,me:false,p:b.lap*T.seg+b.s,b});
+  const arr=[];
+  const line=S.laps*T.seg;
+  const myP=myFinishTime>0?line:(lap-1)*T.seg+car.idx;
+  arr.push({name:'YOU',me:true,fin:myFinishTime>0,t:myFinishTime,p:myP});
+  for(const b of bots)arr.push({
+    name:b.name,me:false,fin:!!b.finished,t:b.finishTime||0,
+    p:b.finished?line:b.lap*T.seg+b.s,bot:b
+  });
+  /* the host streams its bots to the guests */
   if(net.role!=='host'&&net.state==='connected'){
-    for(const b of net.bots)arr.push({name:b.name||'BOT',me:false,p:(b.lap||0)*T.seg+(b.s||0)});
+    for(const b of net.bots)arr.push({
+      name:b.name||'BOT',me:false,fin:!!b.fin,t:b.t||0,
+      p:b.fin?line:(b.lap||0)*T.seg+(b.s||0)
+    });
   }
   for(const id in net.players){
     if(id===net.id)continue;
     const p=net.players[id];
     if(!p.got)continue;
-    arr.push({name:p.name||'RIVAL',me:false,p:(p.lap-1)*T.seg+(p.idx||0)});
+    arr.push({
+      name:p.name||'RIVAL',me:false,fin:!!p.fin,t:p.t||0,
+      p:p.fin?line:((p.lap||1)-1)*T.seg+(p.idx||0)
+    });
   }
-  arr.sort((a,b)=>b.p-a.p);
+  arr.sort(rankCmp);
   return arr;
 }
 
@@ -3939,20 +4011,32 @@ function setPosNum(pos,total){
 }
 
 function updateStandingsDom(){
-  if(S.raceOver)return;
+  if(T.seg<=0)return;
   const arr=standings();
   let mePos=1;
   for(let i=0;i<arr.length;i++)if(arr[i].me)mePos=i+1;
-  setPosNum(mePos,arr.length);
-  const pl=(lap-1)*T.seg+car.idx;
+  /* the badge is the live place; it stays where you were flagged for it */
+  if(!S.raceOver)setPosNum(mePos,arr.length);
+  const myP=myFinishTime>0?(S.laps*T.seg):((lap-1)*T.seg+car.idx);
   let html='';
   for(let i=0;i<arr.length&&i<12;i++){
+    const e=arr[i];
     let gap='—';
-    if(!arr[i].me){
-      const d=(arr[i].p-pl)*T.segLen;
-      gap=(d>=0?'+':'−')+Math.abs(d).toFixed(0)+'m';
+    if(!e.me){
+      if(e.fin){
+        gap='FIN';
+      }else{
+        const d=e.p-myP;
+        const laps=Math.abs(d)/T.seg;
+        if(laps>=0.999){
+          gap=(d>=0?'+':'−')+Math.round(laps)+'L';
+        }else{
+          gap=(d>=0?'+':'−')+Math.round(Math.abs(d)*T.segLen)+'m';
+        }
+      }
     }
-    html+='<div class="row'+(arr[i].me?' me':'')+'"><span>'+(i+1)+' '+arr[i].name+'</span><span>'+gap+'</span></div>';
+    html+='<div class="row'+(e.me?' me':'')+(e.fin?' fin':'')+'">'+
+      '<span>'+(i+1)+' '+e.name+'</span><span>'+gap+'</span></div>';
   }
   $('standings').innerHTML=html;
 }
@@ -4020,61 +4104,110 @@ function openResults(rows,pos,total){
 function finishRace(){
   if(S.raceOver)return;
   S.raceOver=true;
-  stopEngineSound();
-  setTouchVisible(false);
-
   const now=raceTime;
-  /* rivals who have actually crossed the line rank ahead of you, everyone
-     still out on track ranks behind */
-  const fin=bots.filter(b=>b.finished).sort((a,b)=>a.finishTime-b.finishTime);
-  const rest=bots.filter(b=>!b.finished).sort(
-    (a,b)=>(b.lap*T.seg+b.s)-(a.lap*T.seg+a.s));
-  const pos=1+fin.length;
+  myFinishTime=now;
+  stopEngineSound();
+
+  /* the place comes from the whole field, human rivals included: only the
+     drivers already flagged ahead of you are actually ahead of you */
+  const field=standings();
+  let pos=1;
+  for(let i=0;i<field.length;i++)if(field[i].me)pos=i+1;
+  const total=Math.max(1,field.length);
   const rows=[];
-  for(const b of fin)rows.push({name:b.name,me:false,time:b.finishTime});
-  rows.push({name:'YOU',me:true,time:now});
-  for(const b of rest)rows.push({name:b.name,me:false,time:projectedBotTime(b,now)});
+  for(const e of field){
+    if(e.me){
+      rows.push({name:'YOU',me:true,time:now});
+    }else if(e.bot){
+      rows.push({name:e.name,me:false,
+        time:e.bot.finished?e.bot.finishTime:projectedBotTime(e.bot,now)});
+    }else{
+      rows.push({name:e.name,me:false,time:e.fin?e.t:now});
+    }
+  }
 
   showFinishBanner(pos<=2);
-  setPosNum(pos,bots.length+1);
+  setPosNum(pos,total);
 
   setTimeout(()=>{
-    S.running=false;
     if(net.state==='connected'){
       const text=(S.partyMode==='drift')
         ? Math.round(car.driftScore||0)+' pts'
-        : fmt(raceTime);
+        : fmt(now);
       if(net.role==='host'){
         net.done[net.id]=text;
-        netEndRace();
+        net.doneT[net.id]=now;
+        showWaitBanner(true);
+        netMaybeEndRace();
       }else{
-        netToHost({t:'done',id:net.id,text:text});
-        netSay('Waiting for the host to post the results…',false);
+        netToHost({t:'done',id:net.id,text:text,time:now});
+        showWaitBanner(true);
+        netSay('Waiting for the other drivers…',false);
       }
     }else{
+      endRaceWorld();
       openResults(rows,pos,rows.length);
     }
   },3000);
+}
+
+/* The waiting notice does not park anybody: you, the rivals you can see and
+   every bot keep lapping until the board actually goes up, so the drivers
+   still out there have to earn their places instead of passing cars that
+   froze the moment somebody else crossed the line. */
+function endRaceWorld(){
+  S.raceOver=true;
+  S.running=false;
+  showWaitBanner(false);
+  stopEngineSound();
+  setTouchVisible(false);
 }
 
 /* Everybody's board: whoever has crossed the line shows their time, everyone
    still out on track shows the dash. The host is the one who builds it. */
 const NET_DASH='-:—:—';
 
+function showWaitBanner(v){
+  const el=$('waitBanner');
+  if(el)el.classList.toggle('on',v!==false);
+}
+
+/* the board only goes up once every human has finished */
+function netMaybeEndRace(){
+  if(net.role!=='host')return;
+  const humans=Object.keys(net.players);
+  if(!humans.length)return;
+  if(!humans.every(id=>net.done[id]))return;
+  netEndRace();
+}
+
 function netEndRace(){
   if(net.role!=='host')return;
-  const humans=netPlayerList().slice();
-  humans.sort((a,b)=>{
-    const fa=net.done[a.id]?0:1,fb=net.done[b.id]?0:1;
-    return fa-fb;
-  });
-  const rows=humans.map(p=>({id:p.id,name:p.name||'DRIVER',text:net.done[p.id]||NET_DASH}));
-  for(const b of bots){
-    rows.push({id:'bot_'+b.name,name:b.name,text:b.finished?fmt(b.finishTime):NET_DASH});
+  /* one table for humans and bots: a place comes from when a driver crossed
+     the line, or from how far they got if they never did */
+  const line=S.laps*T.seg;
+  const entries=[];
+  for(const p of netPlayerList()){
+    const fin=net.done[p.id]!==undefined;
+    entries.push({
+      id:p.id,name:p.name||'DRIVER',me:p.id===net.id,
+      fin:fin,t:net.doneT[p.id]||0,
+      text:fin?(net.done[p.id]||NET_DASH):NET_DASH,
+      p:fin?line:((p.lap||1)-1)*T.seg+(p.idx||0)
+    });
   }
+  for(const b of bots){
+    entries.push({
+      id:'bot_'+b.name,name:b.name,me:false,
+      fin:!!b.finished,t:b.finishTime||0,
+      text:b.finished?fmt(b.finishTime):NET_DASH,
+      p:b.finished?line:b.lap*T.seg+b.s
+    });
+  }
+  entries.sort(rankCmp);
+  const rows=entries.map(e=>({id:e.id,name:e.name,me:e.me,text:e.text}));
   netBroadcast({t:'fin',rows});
-  S.raceOver=true;
-  S.running=false;
+  endRaceWorld();
   mpResults(rows);
 }
 
@@ -4115,7 +4248,7 @@ const net={
   players:{},
   lobby:{mode:'race',track:'apex',laps:3,bots:0,diff:1},
   ready:false,lastSent:0,lastWorld:0,
-  rigs:{},bots:[],done:{}
+  rigs:{},bots:[],done:{},doneT:{}
 };
 
 function netSay(txt,ok){
@@ -4132,6 +4265,7 @@ function netReset(){
   net.role=null;net.code='';net.id=null;net.name='HOST';
   net.state='idle';net.players={};net.ready=false;
   net.done={};
+  net.doneT={};
   net.lobby={mode:'race',track:'apex',laps:3,bots:0,diff:1};
   netClearRigs();
   netSay('',false);
@@ -4443,7 +4577,8 @@ function netHandle(m){
     if(m.t==='done'){
       if(!net.done[m.id]){
         net.done[m.id]=m.text||NET_DASH;
-        if(!S.raceOver)netEndRace();
+        net.doneT[m.id]=m.time||0;
+        netMaybeEndRace();
       }
       return;
     }
@@ -4464,6 +4599,13 @@ function netHandle(m){
   if(m.t==='you'){
     net.id=m.id;
     mpRender();
+    return;
+  }
+  if(m.t==='kick'){
+    const by=$('leaveBy');
+    if(by)by.textContent=(m.by||'THE HOST').toUpperCase()+' · PARTY OVER';
+    const box=$('leaveAsk');
+    if(box)box.classList.add('on');
     return;
   }
   if(m.t==='lobby'){
@@ -4489,14 +4631,14 @@ function netHandle(m){
       cur.x=p.x;cur.y=p.y;cur.z=p.z;cur.yaw=p.yaw;
       cur.sp=p.sp||0;cur.lap=p.lap||1;cur.idx=p.idx||0;
       cur.score=p.score||0;cur.dmg=p.dmg||0;cur.got=true;
+      cur.fin=!!p.fin;cur.t=p.t||0;
       cur.name=p.name||cur.name;cur.car=p.car||cur.car;cur.color=p.color===undefined?cur.color:p.color;
     }
     net.bots=m.bots||[];
     return;
   }
   if(m.t==='fin'){
-    S.raceOver=true;
-    S.running=false;
+    endRaceWorld();
     mpResults(m.rows||[]);
   }
 }
@@ -4538,6 +4680,7 @@ function netAttachConn(conn){
       }
       netSay(net.conns.length?'A rival left the lobby.':'Rivals left the lobby.',net.conns.length>0);
       net.lobby.bots=Math.min(net.lobby.bots||0,maxBotsFor(netPlayerList().length));
+      netMaybeEndRace();
       mpPushLobby();
     });
     return;
@@ -4797,12 +4940,12 @@ function mpResults(rows){
   const el=$('results');
   if(!el)return;
   const title=$('resTitle');
-  const mine=rows.find(r=>r.id===net.id);
+  const mine=rows.find(r=>r.me||r.id===net.id);
   if(title)title.textContent=mine?('P'+(rows.indexOf(mine)+1)+' / '+rows.length):'RACE COMPLETE';
   const list=$('resList');
   if(list){
     list.innerHTML=rows.map((r,i)=>
-      '<div class="row'+(r.id===net.id?' me':'')+'"><span>'+(i+1)+'. '+(r.name||'RIVAL')+'</span><span>'+r.text+'</span></div>').join('');
+      '<div class="row'+((r.me||r.id===net.id)?' me':'')+'"><span>'+(i+1)+'. '+(r.name||'RIVAL')+'</span><span>'+r.text+'</span></div>').join('');
   }
   el.classList.remove('on','btnon');
   void el.offsetWidth;
@@ -4825,7 +4968,9 @@ function ensureRemoteRig(id){
 const _netPos=new THREE.Vector3();
 function netSyncRigs(dt){
   if(net.state!=='connected'&&net.state!=='lobby')return;
-  const inRace=S.screen==='race'&&!S.raceOver;
+  /* the world stays live through the waiting notice, so rivals and the bots
+     the host streams keep showing until the board is actually up */
+  const inRace=S.screen==='race'&&S.running;
   for(const id in net.players){
     if(id===net.id)continue;
     const p=net.players[id];
@@ -4898,6 +5043,16 @@ function wireParty(){
   const go=$('mpGo'),leave=$('mpLeave'),gar=$('mpGarage'),back=$('mpBack');
   if(go)go.onclick=()=>mpStart();
   if(leave)leave.onclick=()=>{netReset();openGarage();};
+  const ep=$('pauseEndParty');
+  if(ep)ep.onclick=()=>{
+    if(net.role!=='host')return;
+    netBroadcast({t:'kick',by:net.name});
+    setPaused(false);
+    setTimeout(()=>{netReset();openGarage();},200);
+  };
+  const ly=$('leaveYes'),ln=$('leaveNo');
+  if(ly)ly.onclick=()=>{ $('leaveAsk').classList.remove('on'); netReset(); openGarage(); };
+  if(ln)ln.onclick=()=>$('leaveAsk').classList.remove('on');
   if(gar)gar.onclick=()=>{
     const m=$('mp');if(m)m.classList.remove('on');
     mpShowBack(true);
@@ -4915,6 +5070,8 @@ function setPaused(on){
   if(el)el.classList.toggle('on',paused);
   setTouchVisible(S.screen==='race'&&!paused&&!S.raceOver);
   if(paused)renderPauseInfo();
+  const ep=$('pauseEndParty');
+  if(ep)ep.style.display=(net.state==='connected'&&net.role==='host')?'block':'none';
   if(paused)stopEngineSound();
 }
 
@@ -5810,16 +5967,20 @@ function renderParts(){
 /* ============================================================
    what's new
    ============================================================ */
-const APP_VERSION='1.25';
+const APP_VERSION='1.27';
 const WHATS_NEW=[
-  ['BUG FIXES','Multiplayer results are correct whoever crosses the line first. The board now lists every driver and every bot, showing the finisher\'s time and "-:—:—" for anyone still out on track, and the race ends for everyone at once so nobody is left driving against frozen cars.'],
-  ['SOLO FREE ROAM AND DRIFT','The solo Mode picker now offers FREE ROAM and DRIFT alongside Race and Time Attack. Free roam laps the circuit with no finish; drift gives you sixty seconds to bank the highest slide score.'],
-  ['CUSTOM RACE LENGTH','Laps are now a 1–10 slider instead of three presets, in both solo and party racing.'],
-  ['PERSONAL BEST LAPS','Each circuit remembers your quickest lap between sessions and shows it in the Event tab, ready to beat.']
+  ['THE SECOND PLACE MYSTERY','The car running last was being shown in second, because every human was ranked above every bot no matter when they crossed the line. Places now follow one rule for the whole field: whoever is flagged is ahead of everyone still out there, finishers go in the order they crossed, and the rest go by the distance they have really covered.'],
+  ['GAPS IN LAPS','Gaps read like a racing board now: +320m for a close fight, and +1L or −2L when somebody is a lap up or down, instead of a four digit metre count. A driver who has already crossed the line shows FIN.'],
+  ['THE WHOLE BOARD','All twelve cars fit in the standings, and the board keeps updating while you wait for the rest of the party instead of freezing the moment you cross the line.'],
+  ['YOUR PLACE IS YOUR PLACE','The position on the finish banner and the big number now come from the same table as the scoreboard, human rivals included, so a guest is no longer told P1 while running dead last.']
 ];
 
 /* shortened history, shown only in the options copy of the patch notes */
 const PATCH_HISTORY=[
+  ['1.27','Scoreboard ranks the whole field by the flag, lap gaps, live board while waiting'],
+  ['1.26.1','Waiting notice no longer freezes the field — everyone keeps driving'],
+  ['1.26','Results for the whole field, waiting notice, host can end the party'],
+  ['1.25','Results for the whole field, solo free roam and drift, custom laps, best laps'],
   ['1.24','Twelve-car grid, custom bot and lap counts, four-driver lobbies'],
   ['1.23','Boot loading screen before the menu, then What\'s New and its lock'],
   ['1.22.1','Direct parties keep the code panel visible until a rival connects'],
@@ -6266,6 +6427,7 @@ function cancelLoading(){
 
 function openGarage(){
   cancelLoading();
+  showWaitBanner(false);
   stopEngineSound();
   startMenuMusic();
   S.screen='menu';
@@ -6430,6 +6592,7 @@ function showShowroom(){
 
 function startRace(){
   if(loadingActive)return;
+  showWaitBanner(false);
   const def=trackDef();
   if(net.state==='connected'&&net.role==='host'){
     mpLoadMs=3000;
@@ -6441,6 +6604,7 @@ function startRace(){
   }
   if(net.state==='connected'&&net.role==='guest')S.bots=0;
   net.done={};
+  net.doneT={};
   if(net.state!=='connected'){
     const m=S.opts.mode;
     S.partyMode=(m==='free')?'free':((m==='drift')?'drift':'race');
@@ -6492,6 +6656,7 @@ function startRace(){
   spawnBots(S.opts.mode==='time'?0:S.bots);
 
   raceTime=0;lapStartTime=0;bestLap=Infinity;lastLapShown=0;
+  myFinishTime=0;
   lapSecs=[];bestSecs=null;sectorStart=0;lapHistory=[];
   lap=1;sector=0;visited.clear();
   lastIdx=nearestIndexFull(car.pos);
@@ -6755,7 +6920,7 @@ function frame(now){
     updateParticles(dt);
   }
 
-  if(S.partyMode==='drift'&&S.running&&driftEnd&&performance.now()>driftEnd)finishRace();
+  if(S.partyMode==='drift'&&S.running&&!S.raceOver&&driftEnd&&performance.now()>driftEnd)finishRace();
 
   netSyncRigs(dt);
   if(net.state==='connected'&&S.running&&now-net.lastSent>50){
@@ -6769,14 +6934,15 @@ function frame(now){
       net.bots=bots.map(b=>({
         car:b.def.id,name:b.name,
         x:b.pos.x,y:b.pos.y,z:b.pos.z,yaw:b.yaw,pitch:b.pitch,
-        lap:b.lap,s:b.s
+        lap:b.lap,s:b.s,fin:!!b.finished,t:b.finishTime||0
       }));
       netBroadcast({
         t:'w',
         players:netPlayerList().map(p=>({
           id:p.id,name:p.name,car:p.car,color:p.color,
           x:p.x||0,y:p.y||0,z:p.z||0,yaw:p.yaw||0,sp:p.sp||0,
-          lap:p.lap||1,idx:p.idx||0,score:p.score||0
+          lap:p.lap||1,idx:p.idx||0,score:p.score||0,
+          fin:net.done[p.id]!==undefined,t:net.doneT[p.id]||0
         })),
         bots:net.bots
       });
